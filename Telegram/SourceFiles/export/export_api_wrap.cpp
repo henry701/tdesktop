@@ -89,9 +89,9 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 	return Settings::Type(0);
 }
 
-[[nodiscard]] int SinglePeerUpperBoundOffsetDate(const Settings &settings) {
-	return (settings.singlePeerTill > 0)
-		? (settings.singlePeerTill - 1)
+[[nodiscard]] int SinglePeerLowerBoundOffsetDate(const Settings &settings) {
+	return (settings.singlePeerFrom > 0)
+		? (settings.singlePeerFrom - 1)
 		: 0;
 }
 
@@ -100,31 +100,31 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 		const Settings &settings) {
 	auto &list = slice.list;
 
-	// Export slices are processed newest-to-oldest, so messages newer than
-	// the requested range are grouped at the front, older ones at the back.
+	// Export slices are processed oldest-to-newest, so messages older than
+	// the requested range are grouped at the front, newer ones at the back.
 	auto from = 0;
 	const auto size = int(list.size());
 	while (from < size
-		&& settings.singlePeerTill > 0
-		&& list[from].date >= settings.singlePeerTill) {
+		&& settings.singlePeerFrom > 0
+		&& list[from].date < settings.singlePeerFrom) {
 		++from;
 	}
 
 	auto till = size;
 	while (till > from
-		&& settings.singlePeerFrom > 0
-		&& list[till - 1].date < settings.singlePeerFrom) {
+		&& settings.singlePeerTill > 0
+		&& list[till - 1].date >= settings.singlePeerTill) {
 		--till;
 	}
 
-	const auto reachedLowerBound = (till < size);
-	if (till < size) {
-		list.erase(begin(list) + till, end(list));
-	}
+	const auto reachedUpperBound = (till < size);
 	if (from > 0) {
 		list.erase(begin(list), begin(list) + from);
 	}
-	return reachedLowerBound;
+	if (till < size) {
+		list.erase(begin(list) + (till - from), end(list));
+	}
+	return reachedUpperBound;
 }
 
 } // namespace
@@ -1916,15 +1916,15 @@ void ApiWrap::requestMessagesSlice() {
 		return;
 	}
 	// messages.search has no offset_date equivalent, so only jump directly to
-	// the upper bound for the normal getHistory-based traversal.
-	const auto fromUpperDateBound = (_chatProcess->largestIdPlusOne == 1)
+	// the lower bound for the normal getHistory-based traversal.
+	const auto fromLowerDateBound = (_chatProcess->largestIdPlusOne == 1)
 		&& !_chatProcess->info.onlyMyMessages
-		&& (_settings->singlePeerTill > 0);
+		&& (_settings->singlePeerFrom > 0);
 	requestChatMessages(
 		_chatProcess->info.splits[_chatProcess->localSplitIndex],
-		fromUpperDateBound ? 0 : _chatProcess->largestIdPlusOne,
-		fromUpperDateBound ? SinglePeerUpperBoundOffsetDate(*_settings) : 0,
-		fromUpperDateBound ? 0 : -kMessagesSliceLimit,
+		fromLowerDateBound ? 0 : _chatProcess->largestIdPlusOne,
+		fromLowerDateBound ? SinglePeerLowerBoundOffsetDate(*_settings) : 0,
+		-kMessagesSliceLimit,
 		kMessagesSliceLimit,
 		[=](const MTPmessages_Messages &result) {
 		Expects(_chatProcess != nullptr);
@@ -2028,10 +2028,10 @@ void ApiWrap::loadMessagesFiles(Data::MessagesSlice &&slice) {
 	Expects(_chatProcess != nullptr);
 	Expects(!_chatProcess->slice.has_value());
 
-	const auto reachedLowerBound = TrimMessagesSliceByDateRange(
+	const auto reachedUpperBound = TrimMessagesSliceByDateRange(
 		slice,
 		*_settings);
-	if (reachedLowerBound) {
+	if (reachedUpperBound) {
 		_chatProcess->lastSlice = true;
 	}
 
