@@ -89,6 +89,44 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 	return Settings::Type(0);
 }
 
+[[nodiscard]] int SinglePeerUpperBoundOffsetDate(const Settings &settings) {
+	return (settings.singlePeerTill > 0)
+		? (settings.singlePeerTill - 1)
+		: 0;
+}
+
+[[nodiscard]] bool TrimMessagesSliceByDateRange(
+		Data::MessagesSlice &slice,
+		const Settings &settings) {
+	auto &list = slice.list;
+
+	// Export slices are processed newest-to-oldest, so messages newer than
+	// the requested range are grouped at the front, older ones at the back.
+	auto from = 0;
+	const auto size = int(list.size());
+	while (from < size
+		&& settings.singlePeerTill > 0
+		&& list[from].date >= settings.singlePeerTill) {
+		++from;
+	}
+
+	auto till = size;
+	while (till > from
+		&& settings.singlePeerFrom > 0
+		&& list[till - 1].date < settings.singlePeerFrom) {
+		--till;
+	}
+
+	const auto reachedLowerBound = (till < size);
+	if (till < size) {
+		list.erase(begin(list) + till, end(list));
+	}
+	if (from > 0) {
+		list.erase(begin(list), begin(list) + from);
+	}
+	return reachedLowerBound;
+}
+
 } // namespace
 
 class ApiWrap::LoadedFileCache {
@@ -1467,6 +1505,7 @@ void ApiWrap::requestMessagesCount(int localSplitIndex) {
 	requestChatMessages(
 		_chatProcess->info.splits[localSplitIndex],
 		0, // offset_id
+		0, // offset_date
 		0, // add_offset
 		1, // limit
 		[=](const MTPmessages_Messages &result) {
@@ -1511,6 +1550,7 @@ void ApiWrap::checkFirstMessageDate(int localSplitIndex, int count) {
 	requestChatMessages(
 		_chatProcess->info.splits[localSplitIndex],
 		1, // offset_id
+		0, // offset_date
 		-1, // add_offset
 		1, // limit
 		[=](const MTPmessages_Messages &result) {
@@ -1875,10 +1915,16 @@ void ApiWrap::requestMessagesSlice() {
 		loadMessagesFiles({});
 		return;
 	}
+	// messages.search has no offset_date equivalent, so only jump directly to
+	// the upper bound for the normal getHistory-based traversal.
+	const auto fromUpperDateBound = (_chatProcess->largestIdPlusOne == 1)
+		&& !_chatProcess->info.onlyMyMessages
+		&& (_settings->singlePeerTill > 0);
 	requestChatMessages(
 		_chatProcess->info.splits[_chatProcess->localSplitIndex],
-		_chatProcess->largestIdPlusOne,
-		-kMessagesSliceLimit,
+		fromUpperDateBound ? 0 : _chatProcess->largestIdPlusOne,
+		fromUpperDateBound ? SinglePeerUpperBoundOffsetDate(*_settings) : 0,
+		fromUpperDateBound ? 0 : -kMessagesSliceLimit,
 		kMessagesSliceLimit,
 		[=](const MTPmessages_Messages &result) {
 		Expects(_chatProcess != nullptr);
@@ -1902,6 +1948,7 @@ void ApiWrap::requestMessagesSlice() {
 void ApiWrap::requestChatMessages(
 		int splitIndex,
 		int offsetId,
+		int offsetDate,
 		int addOffset,
 		int limit,
 		FnMut<void(MTPmessages_Messages&&)> done) {
@@ -1946,7 +1993,7 @@ void ApiWrap::requestChatMessages(
 		splitRequest(realSplitIndex, MTPmessages_GetHistory(
 			realPeerInput,
 			MTP_int(offsetId),
-			MTP_int(0), // offset_date
+			MTP_int(offsetDate),
 			MTP_int(addOffset),
 			MTP_int(limit),
 			MTP_int(0), // max_id
@@ -1965,6 +2012,7 @@ void ApiWrap::requestChatMessages(
 					requestChatMessages(
 						splitIndex,
 						offsetId,
+						offsetDate,
 						addOffset,
 						limit,
 						base::take(_chatProcess->requestDone));
@@ -1979,6 +2027,13 @@ void ApiWrap::requestChatMessages(
 void ApiWrap::loadMessagesFiles(Data::MessagesSlice &&slice) {
 	Expects(_chatProcess != nullptr);
 	Expects(!_chatProcess->slice.has_value());
+
+	const auto reachedLowerBound = TrimMessagesSliceByDateRange(
+		slice,
+		*_settings);
+	if (reachedLowerBound) {
+		_chatProcess->lastSlice = true;
+	}
 
 	collectMessagesCustomEmoji(slice);
 
