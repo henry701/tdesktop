@@ -207,6 +207,15 @@ private:
 	void checkFirstMessageDate(int localSplitIndex, int count);
 	void messagesCountLoaded(int localSplitIndex, int count);
 	void requestMessagesSlice();
+	void requestOnlyMyMessagesAnchor();
+	void requestOnlyMyMessagesAnchorExponential(
+		int lowerRank,
+		int upperRank,
+		int count);
+	void requestOnlyMyMessagesAnchorBinary(int lowerRank, int upperRank);
+	void requestOnlyMyMessagesAnchorProbe(
+		int rank,
+		FnMut<void(int32 id, TimeId date)> done);
 	void requestChatMessages(
 		int splitIndex,
 		int offsetId,
