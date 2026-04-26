@@ -100,8 +100,7 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 		const Settings &settings) {
 	const auto dateFiltered = (settings.singlePeerFrom > 0)
 		|| (settings.singlePeerTill > 0);
-	return dateFiltered
-		&& (!info.onlyMyMessages || settings.singlePeerFrom <= 0);
+	return dateFiltered && !info.onlyMyMessages;
 }
 
 [[nodiscard]] bool TrimMessagesSliceByDateRange(
@@ -134,30 +133,6 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 		list.erase(begin(list) + (till - from), end(list));
 	}
 	return reachedUpperBound;
-}
-
-void ParseSingleMessage(
-		const MTPmessages_Messages &data,
-		FnMut<void(int32 id, TimeId date)> done) {
-	const auto parsed = data.match([&](
-			const MTPDmessages_messagesNotModified &) {
-		return std::pair<int32, TimeId>(0, 0);
-	}, [&](const auto &data) {
-		const auto &list = data.vmessages().v;
-		if (list.isEmpty()) {
-			return std::pair<int32, TimeId>(0, 0);
-		}
-		return list[0].match(
-			[](const MTPDmessageEmpty &) {
-				return std::pair<int32, TimeId>(0, 0);
-			},
-			[](const auto &data) {
-				return std::pair<int32, TimeId>(
-					data.vid().v,
-					data.vdate().v);
-			});
-	});
-	done(parsed.first, parsed.second);
 }
 
 } // namespace
@@ -313,16 +288,9 @@ struct ApiWrap::ChatProcess : AbstractMessagesProcess {
 	Data::DialogInfo info;
 
 	FnMut<bool(const Data::DialogInfo &)> start;
-	FnMut<void(int32 id, int rank)> onlyMyMessagesAnchorDone;
 
 	int localSplitIndex = 0;
 	int32 largestIdPlusOne = 1;
-	std::vector<int32> onlyMyMessagesAnchorIds;
-	int onlyMyMessagesAnchorLocalSplitIndex = 0;
-	TimeId onlyMyMessagesAnchorDate = 0;
-	int onlyMyMessagesAnchorCount = 0;
-	bool fallbackDateJumpToOnlyMyAnchor = false;
-	bool onlyMyMessagesAnchorResolved = false;
 };
 
 struct ApiWrap::TopicProcess : AbstractMessagesProcess {
@@ -1618,14 +1586,6 @@ void ApiWrap::messagesCountLoaded(int localSplitIndex, int count) {
 void ApiWrap::prepareMessagesStart() {
 	Expects(_chatProcess != nullptr);
 
-	if (_chatProcess->info.onlyMyMessages
-		&& (_settings->singlePeerFrom > 0)) {
-		_chatProcess->onlyMyMessagesAnchorIds.assign(
-			_chatProcess->info.splits.size(),
-			1);
-		prepareOnlyMyMessagesProgress(0);
-		return;
-	}
 	startMessages();
 }
 
@@ -1641,220 +1601,6 @@ void ApiWrap::startMessages() {
 	if (_chatProcess->start(startInfo)) {
 		requestMessagesSlice();
 	}
-}
-
-void ApiWrap::prepareOnlyMyMessagesProgress(int localSplitIndex) {
-	Expects(_chatProcess != nullptr);
-	Expects(_chatProcess->info.onlyMyMessages);
-	Expects(_settings->singlePeerFrom > 0);
-
-	if (localSplitIndex >= _chatProcess->info.splits.size()) {
-		startMessages();
-		return;
-	}
-
-	const auto count = _chatProcess->info.messagesCountPerSplit[
-		localSplitIndex];
-	if (!count) {
-		prepareOnlyMyMessagesProgress(localSplitIndex + 1);
-		return;
-	}
-
-	requestOnlyMyMessagesAnchor(
-		localSplitIndex,
-		_settings->singlePeerFrom,
-		[=](int32 lowerBoundId, int lowerBoundRank) {
-		Expects(_chatProcess != nullptr);
-
-		if (!lowerBoundId) {
-			_chatProcess->info.messagesCountPerSplit[localSplitIndex] = 0;
-			prepareOnlyMyMessagesProgress(localSplitIndex + 1);
-			return;
-		}
-		if (_settings->singlePeerTill <= 0) {
-			onlyMyMessagesProgressLoaded(
-				localSplitIndex,
-				lowerBoundId,
-				lowerBoundRank,
-				count + 1);
-			return;
-		}
-		requestOnlyMyMessagesAnchor(
-			localSplitIndex,
-			_settings->singlePeerTill,
-			[=](int32, int upperBoundRank) {
-			Expects(_chatProcess != nullptr);
-
-			onlyMyMessagesProgressLoaded(
-				localSplitIndex,
-				lowerBoundId,
-				lowerBoundRank,
-				upperBoundRank);
-		});
-	});
-}
-
-void ApiWrap::onlyMyMessagesProgressLoaded(
-		int localSplitIndex,
-		int32 lowerBoundId,
-		int lowerBoundRank,
-		int upperBoundRank) {
-	Expects(_chatProcess != nullptr);
-	Expects(localSplitIndex < _chatProcess->info.splits.size());
-	Expects(localSplitIndex < _chatProcess->onlyMyMessagesAnchorIds.size());
-	Expects(lowerBoundRank > 0);
-	Expects(upperBoundRank > 0);
-
-	auto &count = _chatProcess->info.messagesCountPerSplit[localSplitIndex];
-	count = std::max(
-		0,
-		std::min(count, upperBoundRank - lowerBoundRank));
-	_chatProcess->onlyMyMessagesAnchorIds[localSplitIndex] = lowerBoundId;
-
-	prepareOnlyMyMessagesProgress(localSplitIndex + 1);
-}
-
-void ApiWrap::requestOnlyMyMessagesAnchor(
-		int localSplitIndex,
-		TimeId date,
-		FnMut<void(int32 id, int rank)> done) {
-	Expects(_chatProcess != nullptr);
-	Expects(_chatProcess->info.onlyMyMessages);
-	Expects(localSplitIndex < _chatProcess->info.splits.size());
-	Expects(date > 0);
-
-	const auto count = _chatProcess->info.messagesCountPerSplit[
-		localSplitIndex];
-	Expects(count > 0);
-
-	_chatProcess->onlyMyMessagesAnchorLocalSplitIndex = localSplitIndex;
-	_chatProcess->onlyMyMessagesAnchorDate = date;
-	_chatProcess->onlyMyMessagesAnchorCount = count;
-	_chatProcess->onlyMyMessagesAnchorDone = std::move(done);
-
-	requestOnlyMyMessagesAnchorProbe(1, [=](int32 id, TimeId probeDate) {
-		Expects(_chatProcess != nullptr);
-
-		if (!id) {
-			onlyMyMessagesAnchorMissing();
-			return;
-		}
-		if (probeDate >= _chatProcess->onlyMyMessagesAnchorDate) {
-			onlyMyMessagesAnchorLoaded(id, 1);
-			return;
-		}
-		if (count == 1) {
-			onlyMyMessagesAnchorMissing();
-			return;
-		}
-		requestOnlyMyMessagesAnchorExponential(
-			1,
-			std::min(2, count),
-			count);
-	});
-}
-
-void ApiWrap::requestOnlyMyMessagesAnchorExponential(
-		int lowerRank,
-		int upperRank,
-		int count) {
-	Expects(_chatProcess != nullptr);
-	Expects(lowerRank > 0);
-	Expects(lowerRank < upperRank);
-	Expects(upperRank <= count);
-
-	requestOnlyMyMessagesAnchorProbe(upperRank, [=](int32 id, TimeId date) {
-		Expects(_chatProcess != nullptr);
-
-		if (!id) {
-			requestOnlyMyMessagesAnchorBinary(lowerRank, upperRank);
-			return;
-		}
-		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
-			requestOnlyMyMessagesAnchorBinary(lowerRank, upperRank);
-			return;
-		}
-		if (upperRank >= count) {
-			onlyMyMessagesAnchorMissing();
-			return;
-		}
-		requestOnlyMyMessagesAnchorExponential(
-			upperRank,
-			std::min(upperRank * 2, count),
-			count);
-	});
-}
-
-void ApiWrap::requestOnlyMyMessagesAnchorBinary(
-		int lowerRank,
-		int upperRank) {
-	Expects(_chatProcess != nullptr);
-	Expects(lowerRank > 0);
-	Expects(lowerRank < upperRank);
-
-	if (upperRank == lowerRank + 1) {
-		requestOnlyMyMessagesAnchorProbe(upperRank, [=](int32 id, TimeId date) {
-			Expects(_chatProcess != nullptr);
-
-			if (!id || date < _chatProcess->onlyMyMessagesAnchorDate) {
-				onlyMyMessagesAnchorMissing();
-				return;
-			}
-			onlyMyMessagesAnchorLoaded(id, upperRank);
-		});
-		return;
-	}
-
-	const auto middleRank = lowerRank + ((upperRank - lowerRank) / 2);
-	requestOnlyMyMessagesAnchorProbe(middleRank, [=](int32 id, TimeId date) {
-		Expects(_chatProcess != nullptr);
-
-		if (!id) {
-			requestOnlyMyMessagesAnchorBinary(lowerRank, middleRank);
-			return;
-		}
-		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
-			requestOnlyMyMessagesAnchorBinary(lowerRank, middleRank);
-		} else {
-			requestOnlyMyMessagesAnchorBinary(middleRank, upperRank);
-		}
-	});
-}
-
-void ApiWrap::onlyMyMessagesAnchorLoaded(int32 id, int rank) {
-	Expects(_chatProcess != nullptr);
-	Expects(_chatProcess->onlyMyMessagesAnchorDone != nullptr);
-
-	base::take(_chatProcess->onlyMyMessagesAnchorDone)(id, rank);
-}
-
-void ApiWrap::onlyMyMessagesAnchorMissing() {
-	Expects(_chatProcess != nullptr);
-	Expects(_chatProcess->onlyMyMessagesAnchorDone != nullptr);
-
-	base::take(_chatProcess->onlyMyMessagesAnchorDone)(
-		0,
-		_chatProcess->onlyMyMessagesAnchorCount + 1);
-}
-
-void ApiWrap::requestOnlyMyMessagesAnchorProbe(
-		int rank,
-		FnMut<void(int32 id, TimeId date)> done) {
-	Expects(_chatProcess != nullptr);
-	Expects(rank > 0);
-
-	// With offset_id=1, negative add_offset walks the self-message search
-	// stream from the oldest side, so rank=1 gives the oldest own message.
-	requestChatMessages(
-		_chatProcess->info.splits[
-			_chatProcess->onlyMyMessagesAnchorLocalSplitIndex],
-		1, // offset_id
-		0, // offset_date
-		-rank,
-		1, // limit
-		[done = std::move(done)](const MTPmessages_Messages &result) mutable {
-			ParseSingleMessage(result, std::move(done));
-		});
 }
 
 void ApiWrap::finishExport(FnMut<void()> done) {
@@ -2197,40 +1943,11 @@ void ApiWrap::requestMessagesSlice() {
 		loadMessagesFiles({});
 		return;
 	}
-	if (_chatProcess->info.onlyMyMessages
-		&& !_chatProcess->onlyMyMessagesAnchorResolved
-		&& (_settings->singlePeerFrom > 0)) {
-		const auto localSplitIndex = _chatProcess->localSplitIndex;
-		if (localSplitIndex < _chatProcess->onlyMyMessagesAnchorIds.size()) {
-			_chatProcess->onlyMyMessagesAnchorResolved = true;
-			_chatProcess->largestIdPlusOne =
-				_chatProcess->onlyMyMessagesAnchorIds[localSplitIndex];
-		} else {
-			requestOnlyMyMessagesAnchor(
-				localSplitIndex,
-				_settings->singlePeerFrom,
-				[=](int32 id, int) {
-				Expects(_chatProcess != nullptr);
-
-				if (!id) {
-					_chatProcess->info.messagesCountPerSplit[
-						localSplitIndex] = 0;
-					requestMessagesSlice();
-					return;
-				}
-				_chatProcess->onlyMyMessagesAnchorResolved = true;
-				_chatProcess->largestIdPlusOne = id;
-				requestMessagesSlice();
-			});
-			return;
-		}
-	}
 	// messages.search has no offset_date equivalent, so only jump directly to
 	// the lower bound for the normal getHistory-based traversal.
 	const auto fromLowerDateBound = (_chatProcess->largestIdPlusOne == 1)
 		&& !_chatProcess->info.onlyMyMessages
 		&& (_settings->singlePeerFrom > 0);
-	_chatProcess->fallbackDateJumpToOnlyMyAnchor = fromLowerDateBound;
 	requestChatMessages(
 		_chatProcess->info.splits[_chatProcess->localSplitIndex],
 		fromLowerDateBound ? 0 : _chatProcess->largestIdPlusOne,
@@ -2265,9 +1982,6 @@ void ApiWrap::requestChatMessages(
 		FnMut<void(MTPmessages_Messages&&)> done) {
 	Expects(_chatProcess != nullptr);
 
-	const auto fallbackDateJumpToOnlyMyAnchor
-		= _chatProcess->fallbackDateJumpToOnlyMyAnchor;
-	_chatProcess->fallbackDateJumpToOnlyMyAnchor = false;
 	_chatProcess->requestDone = std::move(done);
 	const auto doneHandler = [=](MTPmessages_Messages &&result) {
 		Expects(_chatProcess != nullptr);
@@ -2294,8 +2008,8 @@ void ApiWrap::requestChatMessages(
 			MTPVector<MTPReaction>(), // saved_reaction
 			MTPint(), // top_msg_id
 			MTP_inputMessagesFilterEmpty(),
-			MTP_int(0), // min_date
-			MTP_int(0), // max_date
+			MTP_int(_settings->singlePeerFrom), // min_date
+			MTP_int(_settings->singlePeerTill), // max_date
 			MTP_int(offsetId),
 			MTP_int(addOffset),
 			MTP_int(limit),
@@ -2323,8 +2037,8 @@ void ApiWrap::requestChatMessages(
 					// Perhaps we just left / were kicked from channel.
 					// Just switch to only my messages.
 					_chatProcess->info.onlyMyMessages = true;
-					if (fallbackDateJumpToOnlyMyAnchor) {
-						_chatProcess->onlyMyMessagesAnchorResolved = false;
+					if (offsetDate != 0) {
+						_chatProcess->largestIdPlusOne = 1;
 						requestMessagesSlice();
 						return true;
 					}
@@ -2585,7 +2299,6 @@ void ApiWrap::finishMessagesSlice() {
 			< _chatProcess->info.splits.size())) {
 		_chatProcess->lastSlice = false;
 		_chatProcess->largestIdPlusOne = 1;
-		_chatProcess->onlyMyMessagesAnchorResolved = false;
 	}
 	if (!_chatProcess->lastSlice) {
 		requestMessagesSlice();
