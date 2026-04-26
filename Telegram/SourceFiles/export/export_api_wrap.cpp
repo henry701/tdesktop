@@ -312,6 +312,7 @@ struct ApiWrap::ChatProcess : AbstractMessagesProcess {
 	int onlyMyMessagesAnchorLocalSplitIndex = 0;
 	TimeId onlyMyMessagesAnchorDate = 0;
 	int onlyMyMessagesAnchorCount = 0;
+	bool fallbackDateJumpToOnlyMyAnchor = false;
 	bool onlyMyMessagesAnchorResolved = false;
 };
 
@@ -1651,7 +1652,8 @@ void ApiWrap::prepareOnlyMyMessagesProgress(int localSplitIndex) {
 		Expects(_chatProcess != nullptr);
 
 		if (!lowerBoundId) {
-			error("Failed to resolve only-my-messages export lower bound.");
+			_chatProcess->info.messagesCountPerSplit[localSplitIndex] = 0;
+			prepareOnlyMyMessagesProgress(localSplitIndex + 1);
 			return;
 		}
 		if (_settings->singlePeerTill <= 0) {
@@ -1719,7 +1721,7 @@ void ApiWrap::requestOnlyMyMessagesAnchor(
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
-			error("Unexpected empty anchor in only-my-messages export.");
+			onlyMyMessagesAnchorMissing();
 			return;
 		}
 		if (probeDate >= _chatProcess->onlyMyMessagesAnchorDate) {
@@ -1750,7 +1752,7 @@ void ApiWrap::requestOnlyMyMessagesAnchorExponential(
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
-			error("Unexpected empty probe in only-my-messages export.");
+			onlyMyMessagesAnchorMissing();
 			return;
 		}
 		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
@@ -1780,7 +1782,7 @@ void ApiWrap::requestOnlyMyMessagesAnchorBinary(
 			Expects(_chatProcess != nullptr);
 
 			if (!id || date < _chatProcess->onlyMyMessagesAnchorDate) {
-				error("Failed to resolve only-my-messages export anchor.");
+				onlyMyMessagesAnchorMissing();
 				return;
 			}
 			onlyMyMessagesAnchorLoaded(id, upperRank);
@@ -1793,7 +1795,7 @@ void ApiWrap::requestOnlyMyMessagesAnchorBinary(
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
-			error("Unexpected empty binary probe in only-my-messages export.");
+			onlyMyMessagesAnchorMissing();
 			return;
 		}
 		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
@@ -2211,6 +2213,7 @@ void ApiWrap::requestMessagesSlice() {
 	const auto fromLowerDateBound = (_chatProcess->largestIdPlusOne == 1)
 		&& !_chatProcess->info.onlyMyMessages
 		&& (_settings->singlePeerFrom > 0);
+	_chatProcess->fallbackDateJumpToOnlyMyAnchor = fromLowerDateBound;
 	requestChatMessages(
 		_chatProcess->info.splits[_chatProcess->localSplitIndex],
 		fromLowerDateBound ? 0 : _chatProcess->largestIdPlusOne,
@@ -2245,6 +2248,9 @@ void ApiWrap::requestChatMessages(
 		FnMut<void(MTPmessages_Messages&&)> done) {
 	Expects(_chatProcess != nullptr);
 
+	const auto fallbackDateJumpToOnlyMyAnchor
+		= _chatProcess->fallbackDateJumpToOnlyMyAnchor;
+	_chatProcess->fallbackDateJumpToOnlyMyAnchor = false;
 	_chatProcess->requestDone = std::move(done);
 	const auto doneHandler = [=](MTPmessages_Messages &&result) {
 		Expects(_chatProcess != nullptr);
@@ -2300,6 +2306,11 @@ void ApiWrap::requestChatMessages(
 					// Perhaps we just left / were kicked from channel.
 					// Just switch to only my messages.
 					_chatProcess->info.onlyMyMessages = true;
+					if (fallbackDateJumpToOnlyMyAnchor) {
+						_chatProcess->onlyMyMessagesAnchorResolved = false;
+						requestMessagesSlice();
+						return true;
+					}
 					requestChatMessages(
 						splitIndex,
 						offsetId,
