@@ -1752,7 +1752,7 @@ void ApiWrap::requestOnlyMyMessagesAnchorExponential(
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
-			onlyMyMessagesAnchorMissing();
+			requestOnlyMyMessagesAnchorBinary(lowerRank, upperRank);
 			return;
 		}
 		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
@@ -1795,7 +1795,7 @@ void ApiWrap::requestOnlyMyMessagesAnchorBinary(
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
-			onlyMyMessagesAnchorMissing();
+			requestOnlyMyMessagesAnchorBinary(lowerRank, middleRank);
 			return;
 		}
 		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
@@ -2198,7 +2198,9 @@ void ApiWrap::requestMessagesSlice() {
 				Expects(_chatProcess != nullptr);
 
 				if (!id) {
-					error("Failed to resolve only-my-messages export anchor.");
+					_chatProcess->info.messagesCountPerSplit[
+						localSplitIndex] = 0;
+					requestMessagesSlice();
 					return;
 				}
 				_chatProcess->onlyMyMessagesAnchorResolved = true;
