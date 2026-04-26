@@ -95,6 +95,15 @@ Settings::Type SettingsFromDialogsType(Data::DialogInfo::Type type) {
 		: 0;
 }
 
+[[nodiscard]] bool UseDynamicMessagesProgressCount(
+		const Data::DialogInfo &info,
+		const Settings &settings) {
+	const auto dateFiltered = (settings.singlePeerFrom > 0)
+		|| (settings.singlePeerTill > 0);
+	return dateFiltered
+		&& (!info.onlyMyMessages || settings.singlePeerFrom <= 0);
+}
+
 [[nodiscard]] bool TrimMessagesSliceByDateRange(
 		Data::MessagesSlice &slice,
 		const Settings &settings) {
@@ -1623,7 +1632,13 @@ void ApiWrap::prepareMessagesStart() {
 void ApiWrap::startMessages() {
 	Expects(_chatProcess != nullptr);
 
-	if (_chatProcess->start(_chatProcess->info)) {
+	auto startInfo = _chatProcess->info;
+	if (UseDynamicMessagesProgressCount(startInfo, *_settings)) {
+		for (auto &count : startInfo.messagesCountPerSplit) {
+			count = 0;
+		}
+	}
+	if (_chatProcess->start(startInfo)) {
 		requestMessagesSlice();
 	}
 }
