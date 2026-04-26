@@ -206,13 +206,26 @@ private:
 	void requestMessagesCount(int localSplitIndex);
 	void checkFirstMessageDate(int localSplitIndex, int count);
 	void messagesCountLoaded(int localSplitIndex, int count);
+	void prepareMessagesStart();
+	void startMessages();
+	void prepareOnlyMyMessagesProgress(int localSplitIndex);
+	void onlyMyMessagesProgressLoaded(
+		int localSplitIndex,
+		int32 lowerBoundId,
+		int lowerBoundRank,
+		int upperBoundRank);
 	void requestMessagesSlice();
-	void requestOnlyMyMessagesAnchor();
+	void requestOnlyMyMessagesAnchor(
+		int localSplitIndex,
+		TimeId date,
+		FnMut<void(int32 id, int rank)> done);
 	void requestOnlyMyMessagesAnchorExponential(
 		int lowerRank,
 		int upperRank,
 		int count);
 	void requestOnlyMyMessagesAnchorBinary(int lowerRank, int upperRank);
+	void onlyMyMessagesAnchorLoaded(int32 id, int rank);
+	void onlyMyMessagesAnchorMissing();
 	void requestOnlyMyMessagesAnchorProbe(
 		int rank,
 		FnMut<void(int32 id, TimeId date)> done);

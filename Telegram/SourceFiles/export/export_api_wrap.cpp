@@ -304,9 +304,14 @@ struct ApiWrap::ChatProcess : AbstractMessagesProcess {
 	Data::DialogInfo info;
 
 	FnMut<bool(const Data::DialogInfo &)> start;
+	FnMut<void(int32 id, int rank)> onlyMyMessagesAnchorDone;
 
 	int localSplitIndex = 0;
 	int32 largestIdPlusOne = 1;
+	std::vector<int32> onlyMyMessagesAnchorIds;
+	int onlyMyMessagesAnchorLocalSplitIndex = 0;
+	TimeId onlyMyMessagesAnchorDate = 0;
+	int onlyMyMessagesAnchorCount = 0;
 	bool onlyMyMessagesAnchorResolved = false;
 };
 
@@ -1595,30 +1600,134 @@ void ApiWrap::messagesCountLoaded(int localSplitIndex, int count) {
 	_chatProcess->info.messagesCountPerSplit[localSplitIndex] = count;
 	if (localSplitIndex + 1 < _chatProcess->info.splits.size()) {
 		requestMessagesCount(localSplitIndex + 1);
-	} else if (_chatProcess->start(_chatProcess->info)) {
+	} else {
+		prepareMessagesStart();
+	}
+}
+
+void ApiWrap::prepareMessagesStart() {
+	Expects(_chatProcess != nullptr);
+
+	if (_chatProcess->info.onlyMyMessages
+		&& (_settings->singlePeerFrom > 0)) {
+		_chatProcess->onlyMyMessagesAnchorIds.assign(
+			_chatProcess->info.splits.size(),
+			1);
+		prepareOnlyMyMessagesProgress(0);
+		return;
+	}
+	startMessages();
+}
+
+void ApiWrap::startMessages() {
+	Expects(_chatProcess != nullptr);
+
+	if (_chatProcess->start(_chatProcess->info)) {
 		requestMessagesSlice();
 	}
 }
 
-void ApiWrap::requestOnlyMyMessagesAnchor() {
+void ApiWrap::prepareOnlyMyMessagesProgress(int localSplitIndex) {
 	Expects(_chatProcess != nullptr);
 	Expects(_chatProcess->info.onlyMyMessages);
+	Expects(_settings->singlePeerFrom > 0);
+
+	if (localSplitIndex >= _chatProcess->info.splits.size()) {
+		startMessages();
+		return;
+	}
 
 	const auto count = _chatProcess->info.messagesCountPerSplit[
-		_chatProcess->localSplitIndex];
+		localSplitIndex];
+	if (!count) {
+		prepareOnlyMyMessagesProgress(localSplitIndex + 1);
+		return;
+	}
+
+	requestOnlyMyMessagesAnchor(
+		localSplitIndex,
+		_settings->singlePeerFrom,
+		[=](int32 lowerBoundId, int lowerBoundRank) {
+		Expects(_chatProcess != nullptr);
+
+		if (!lowerBoundId) {
+			error("Failed to resolve only-my-messages export lower bound.");
+			return;
+		}
+		if (_settings->singlePeerTill <= 0) {
+			onlyMyMessagesProgressLoaded(
+				localSplitIndex,
+				lowerBoundId,
+				lowerBoundRank,
+				count + 1);
+			return;
+		}
+		requestOnlyMyMessagesAnchor(
+			localSplitIndex,
+			_settings->singlePeerTill,
+			[=](int32, int upperBoundRank) {
+			Expects(_chatProcess != nullptr);
+
+			onlyMyMessagesProgressLoaded(
+				localSplitIndex,
+				lowerBoundId,
+				lowerBoundRank,
+				upperBoundRank);
+		});
+	});
+}
+
+void ApiWrap::onlyMyMessagesProgressLoaded(
+		int localSplitIndex,
+		int32 lowerBoundId,
+		int lowerBoundRank,
+		int upperBoundRank) {
+	Expects(_chatProcess != nullptr);
+	Expects(localSplitIndex < _chatProcess->info.splits.size());
+	Expects(localSplitIndex < _chatProcess->onlyMyMessagesAnchorIds.size());
+	Expects(lowerBoundRank > 0);
+	Expects(upperBoundRank > 0);
+
+	auto &count = _chatProcess->info.messagesCountPerSplit[localSplitIndex];
+	count = std::max(
+		0,
+		std::min(count, upperBoundRank - lowerBoundRank));
+	_chatProcess->onlyMyMessagesAnchorIds[localSplitIndex] = lowerBoundId;
+
+	prepareOnlyMyMessagesProgress(localSplitIndex + 1);
+}
+
+void ApiWrap::requestOnlyMyMessagesAnchor(
+		int localSplitIndex,
+		TimeId date,
+		FnMut<void(int32 id, int rank)> done) {
+	Expects(_chatProcess != nullptr);
+	Expects(_chatProcess->info.onlyMyMessages);
+	Expects(localSplitIndex < _chatProcess->info.splits.size());
+	Expects(date > 0);
+
+	const auto count = _chatProcess->info.messagesCountPerSplit[
+		localSplitIndex];
 	Expects(count > 0);
 
-	requestOnlyMyMessagesAnchorProbe(1, [=](int32 id, TimeId date) {
+	_chatProcess->onlyMyMessagesAnchorLocalSplitIndex = localSplitIndex;
+	_chatProcess->onlyMyMessagesAnchorDate = date;
+	_chatProcess->onlyMyMessagesAnchorCount = count;
+	_chatProcess->onlyMyMessagesAnchorDone = std::move(done);
+
+	requestOnlyMyMessagesAnchorProbe(1, [=](int32 id, TimeId probeDate) {
 		Expects(_chatProcess != nullptr);
 
 		if (!id) {
 			error("Unexpected empty anchor in only-my-messages export.");
 			return;
 		}
-		if (date >= _settings->singlePeerFrom) {
-			_chatProcess->onlyMyMessagesAnchorResolved = true;
-			_chatProcess->largestIdPlusOne = id;
-			requestMessagesSlice();
+		if (probeDate >= _chatProcess->onlyMyMessagesAnchorDate) {
+			onlyMyMessagesAnchorLoaded(id, 1);
+			return;
+		}
+		if (count == 1) {
+			onlyMyMessagesAnchorMissing();
 			return;
 		}
 		requestOnlyMyMessagesAnchorExponential(
@@ -1644,12 +1753,12 @@ void ApiWrap::requestOnlyMyMessagesAnchorExponential(
 			error("Unexpected empty probe in only-my-messages export.");
 			return;
 		}
-		if (date >= _settings->singlePeerFrom) {
+		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
 			requestOnlyMyMessagesAnchorBinary(lowerRank, upperRank);
 			return;
 		}
 		if (upperRank >= count) {
-			error("Failed to bracket only-my-messages export anchor.");
+			onlyMyMessagesAnchorMissing();
 			return;
 		}
 		requestOnlyMyMessagesAnchorExponential(
@@ -1670,13 +1779,11 @@ void ApiWrap::requestOnlyMyMessagesAnchorBinary(
 		requestOnlyMyMessagesAnchorProbe(upperRank, [=](int32 id, TimeId date) {
 			Expects(_chatProcess != nullptr);
 
-			if (!id || date < _settings->singlePeerFrom) {
+			if (!id || date < _chatProcess->onlyMyMessagesAnchorDate) {
 				error("Failed to resolve only-my-messages export anchor.");
 				return;
 			}
-			_chatProcess->onlyMyMessagesAnchorResolved = true;
-			_chatProcess->largestIdPlusOne = id;
-			requestMessagesSlice();
+			onlyMyMessagesAnchorLoaded(id, upperRank);
 		});
 		return;
 	}
@@ -1689,12 +1796,28 @@ void ApiWrap::requestOnlyMyMessagesAnchorBinary(
 			error("Unexpected empty binary probe in only-my-messages export.");
 			return;
 		}
-		if (date >= _settings->singlePeerFrom) {
+		if (date >= _chatProcess->onlyMyMessagesAnchorDate) {
 			requestOnlyMyMessagesAnchorBinary(lowerRank, middleRank);
 		} else {
 			requestOnlyMyMessagesAnchorBinary(middleRank, upperRank);
 		}
 	});
+}
+
+void ApiWrap::onlyMyMessagesAnchorLoaded(int32 id, int rank) {
+	Expects(_chatProcess != nullptr);
+	Expects(_chatProcess->onlyMyMessagesAnchorDone != nullptr);
+
+	base::take(_chatProcess->onlyMyMessagesAnchorDone)(id, rank);
+}
+
+void ApiWrap::onlyMyMessagesAnchorMissing() {
+	Expects(_chatProcess != nullptr);
+	Expects(_chatProcess->onlyMyMessagesAnchorDone != nullptr);
+
+	base::take(_chatProcess->onlyMyMessagesAnchorDone)(
+		0,
+		_chatProcess->onlyMyMessagesAnchorCount + 1);
 }
 
 void ApiWrap::requestOnlyMyMessagesAnchorProbe(
@@ -1706,7 +1829,8 @@ void ApiWrap::requestOnlyMyMessagesAnchorProbe(
 	// With offset_id=1, negative add_offset walks the self-message search
 	// stream from the oldest side, so rank=1 gives the oldest own message.
 	requestChatMessages(
-		_chatProcess->info.splits[_chatProcess->localSplitIndex],
+		_chatProcess->info.splits[
+			_chatProcess->onlyMyMessagesAnchorLocalSplitIndex],
 		1, // offset_id
 		0, // offset_date
 		-rank,
@@ -2059,8 +2183,28 @@ void ApiWrap::requestMessagesSlice() {
 	if (_chatProcess->info.onlyMyMessages
 		&& !_chatProcess->onlyMyMessagesAnchorResolved
 		&& (_settings->singlePeerFrom > 0)) {
-		requestOnlyMyMessagesAnchor();
-		return;
+		const auto localSplitIndex = _chatProcess->localSplitIndex;
+		if (localSplitIndex < _chatProcess->onlyMyMessagesAnchorIds.size()) {
+			_chatProcess->onlyMyMessagesAnchorResolved = true;
+			_chatProcess->largestIdPlusOne =
+				_chatProcess->onlyMyMessagesAnchorIds[localSplitIndex];
+		} else {
+			requestOnlyMyMessagesAnchor(
+				localSplitIndex,
+				_settings->singlePeerFrom,
+				[=](int32 id, int) {
+				Expects(_chatProcess != nullptr);
+
+				if (!id) {
+					error("Failed to resolve only-my-messages export anchor.");
+					return;
+				}
+				_chatProcess->onlyMyMessagesAnchorResolved = true;
+				_chatProcess->largestIdPlusOne = id;
+				requestMessagesSlice();
+			});
+			return;
+		}
 	}
 	// messages.search has no offset_date equivalent, so only jump directly to
 	// the lower bound for the normal getHistory-based traversal.
