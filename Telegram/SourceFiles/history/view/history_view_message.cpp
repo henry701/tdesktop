@@ -1865,7 +1865,6 @@ void Message::paintFromName(
 		} else {
 			st::dialogsPremiumIcon.icon.paint(p, x, y, width(), color);
 		}
-		availableWidth -= statusWidth;
 	}
 	p.setFont(st::msgNameFont);
 	p.setPen(nameFg);
@@ -3297,7 +3296,6 @@ bool Message::getStateFromName(
 				outResult->link = _fromNameStatus->link;
 				return true;
 			}
-			availableWidth -= statusWidth;
 		}
 		if (point.x() >= availableLeft
 			&& point.x() < availableLeft + availableWidth
@@ -3307,12 +3305,22 @@ bool Message::getStateFromName(
 			_fromLinkRipplePointSet = 1;
 			return true;
 		}
+
+		const auto skipWidth = nameText->maxWidth()
+			+ (_fromNameStatus
+				? (st::dialogsPremiumIcon.icon.width()
+					+ st::msgServiceFont->spacew)
+				: 0)
+			+ st::msgServiceFont->spacew;
+		availableLeft += skipWidth;
+		availableWidth -= skipWidth;
+
 		auto via = item->Get<HistoryMessageVia>();
 		if (via
 			&& !displayForwardedFrom()
-			&& point.x() >= availableLeft + nameText->maxWidth() + st::msgServiceFont->spacew
+			&& point.x() >= availableLeft
 			&& point.x() < availableLeft + availableWidth
-			&& point.x() < availableLeft + nameText->maxWidth() + st::msgServiceFont->spacew + via->width) {
+			&& point.x() < availableLeft + via->width) {
 			outResult->link = via->link;
 			recordLinkRipplePoint(point, trect.topLeft());
 			return true;
@@ -4783,7 +4791,11 @@ ClickHandlerPtr Message::prepareRightActionLink() const {
 			}
 		}
 	});
-	result->setProperty(kFastShareProperty, QVariant::fromValue(true));
+	const auto navigates = data()->externalReply()
+		|| (savedFromPeer && savedFromMsgId);
+	if (!navigates) {
+		result->setProperty(kFastShareProperty, QVariant::fromValue(true));
+	}
 	return result;
 }
 
@@ -5213,6 +5225,7 @@ int Message::resizeContentGetHeight(int newWidth) {
 		}
 		if (contentWidth == maxWidth() && !appearing) {
 			if (mediaDisplayed) {
+				newHeight += media->height() - media->minHeight();
 				if (check) {
 					newHeight += check->resizeGetHeight(contentWidth) + st::mediaInBubbleSkip;
 				}
