@@ -2112,8 +2112,18 @@ Chat ParseChat(const MTPChat &data) {
 		result.monoforumLinkId
 			= data.vlinked_monoforum_id().value_or_empty();
 		result.title = ParseString(data.vtitle());
+		// Dialog slices often set usernames and leave the legacy username
+		// flag clear. Public vs private is decided from that name.
 		if (const auto username = data.vusername()) {
 			result.username = ParseString(*username);
+		}
+		if (result.username.isEmpty() && data.vusernames()) {
+			for (const auto &item : data.vusernames()->v) {
+				if (item.data().is_active()) {
+					result.username = ParseString(item.data().vusername());
+					break;
+				}
+			}
 		}
 		result.input = MTP_inputPeerChannel(
 			MTP_long(result.bareId),

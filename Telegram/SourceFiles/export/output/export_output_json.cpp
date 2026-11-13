@@ -3044,7 +3044,9 @@ Result JsonWriter::writeDialogEnd() {
 }
 
 Result JsonWriter::writeDialogsEnd() {
-	if (_settings.onlySinglePeer()) {
+	// No dialog was written, so the chats/left_chats section was never opened.
+	// Closing it pops the root object and then asserts on the empty stack.
+	if (_settings.onlySinglePeer() || _dialogsMode == DialogsMode::None) {
 		return Result::Success();
 	}
 	return writeChatsEnd();
